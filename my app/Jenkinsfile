@@ -1,0 +1,60 @@
+pipeline {
+agent any
+environment {
+APP_NAME = 'myapp'
+AWS_ACCOUNT_ID = '123456789012'
+AWS_REGION = 'ap-south-1'
+EKS_CLUSTER = 'dev-eks'
+K8S_NAMESPACE = 'dev'
+ECR_REPO = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${APP_NAME}"
+IMAGE_TAG = "${env.BUILD_NUMBER}"
+// Credentials IDs you must create in Jenkins
+AWS_CREDENTIALS = 'aws-creds' // AWS Access Key + Secret (or use role on the agent)
+DOCKERHUB_CREDS = 'dockerhub-creds' // if you pull private base images (optional)
+SONARQUBE_ENV = 'sonarqube' // Sonar server name in Jenkins
+SONAR_TOKEN = credentials('sonar-token')
+}
+options { timestamps(); ansiColor('xterm'); skipDefaultCheckout(true) }
+
+stages {
+stage('Checkout') {
+steps {
+checkout scm
+}
+}
+
+stage('Setup Tooling') {
+steps {
+sh 'node -v || true'
+sh 'aws --version || true'
+}
+}
+
+stage('SonarQube Scan') {
+steps {
+withSonarQubeEnv(SONARQUBE_ENV) {
+sh '''
+cd app
+npm ci
+npm run build
+npm run test -- --coverage --coverageReporters=lcov
+cd ..
+sonar-scanner \
+-Dsonar.login=$SONAR_TOKEN \
+-Dproject.settings=sonar-project.properties
+'''
+}
+}
+}
+
+stage('Quality Gate') {
+steps {
+timeout(time: 10, unit: 'MINUTES') {
+waitForQualityGate abortPipeline: true
+}
+}
+}
+
+stage('Build Image') {
+steps {
+withAWS(credentials: AWS_CREDENTIALS, region: AWS_REGION) {
