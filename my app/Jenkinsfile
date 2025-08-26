@@ -1,60 +1,63 @@
 pipeline {
-agent any
-environment {
-APP_NAME = 'myapp'
-AWS_ACCOUNT_ID = '123456789012'
-AWS_REGION = 'ap-south-1'
-EKS_CLUSTER = 'dev-eks'
-K8S_NAMESPACE = 'dev'
-ECR_REPO = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${APP_NAME}"
-IMAGE_TAG = "${env.BUILD_NUMBER}"
-// Credentials IDs you must create in Jenkins
-AWS_CREDENTIALS = 'aws-creds' // AWS Access Key + Secret (or use role on the agent)
-DOCKERHUB_CREDS = 'dockerhub-creds' // if you pull private base images (optional)
-SONARQUBE_ENV = 'sonarqube' // Sonar server name in Jenkins
-SONAR_TOKEN = credentials('sonar-token')
-}
-options { timestamps(); ansiColor('xterm'); skipDefaultCheckout(true) }
+    agent any
 
-stages {
-stage('Checkout') {
-steps {
-checkout scm
-}
-}
+    environment {
+        REGISTRY = "docker.io"
+        DOCKERHUB_USER = "your-dockerhub-username"
+        DOCKER_IMAGE = "${DOCKERHUB_USER}/myapp"
+        KUBE_CONFIG = credentials('kubeconfig-cred')   // Jenkins secret for kubeconfig
+        DOCKERHUB_PASS = credentials('dockerhub-pass') // Jenkins secret for DockerHub password
+        SONARQUBE_ENV = "sonarqube-server"             // SonarQube Jenkins server config name
+    }
 
-stage('Setup Tooling') {
-steps {
-sh 'node -v || true'
-sh 'aws --version || true'
-}
-}
+    stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'main', url: 'https://github.com/your-repo/myapp.git'
+            }
+        }
 
-stage('SonarQube Scan') {
-steps {
-withSonarQubeEnv(SONARQUBE_ENV) {
-sh '''
-cd app
-npm ci
-npm run build
-npm run test -- --coverage --coverageReporters=lcov
-cd ..
-sonar-scanner \
--Dsonar.login=$SONAR_TOKEN \
--Dproject.settings=sonar-project.properties
-'''
-}
-}
-}
+        stage('SonarQube Analysis') {
+            environment {
+                SONARQUBE_SCANNER_HOME = tool 'SonarQubeScanner'
+            }
+            steps {
+                withSonarQubeEnv("${SONARQUBE_ENV}") {
+                    sh '''
+                        $SONARQUBE_SCANNER_HOME/bin/sonar-scanner \
+                        -Dsonar.projectKey=myapp \
+                        -Dsonar.sources=./src \
+                        -Dsonar.host.url=$SONAR_HOST_URL \
+                        -Dsonar.login=$SONAR_AUTH_TOKEN
+                    '''
+                }
+            }
+        }
 
-stage('Quality Gate') {
-steps {
-timeout(time: 10, unit: 'MINUTES') {
-waitForQualityGate abortPipeline: true
-}
-}
-}
+        stage('Install Dependencies & Test') {
+            steps {
+                sh '''
+                    npm install
+                    npm run build
+                    npm test
+                '''
+            }
+        }
 
-stage('Build Image') {
-steps {
-withAWS(credentials: AWS_CREDENTIALS, region: AWS_REGION) {
+        stage('Build Docker Image') {
+            steps {
+                sh '''
+                    echo $DOCKERHUB_PASS | docker login -u $DOCKERHUB_USER --password-stdin
+                    docker build -t $DOCKER_IMAGE:$BUILD_NUMBER .
+                    docker push $DOCKER_IMAGE:$BUILD_NUMBER
+                    docker tag $DOCKER_IMAGE:$BUILD_NUMBER $DOCKER_IMAGE:latest
+                    docker push $DOCKER_IMAGE:latest
+                '''
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                withKubeConfig([credentialsId: 'kubeconfig-cred']) {
+                    sh '''
+                        kubectl set ima
